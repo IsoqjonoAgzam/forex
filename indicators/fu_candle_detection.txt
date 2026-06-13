@@ -1,0 +1,170 @@
+//@version=5
+indicator("FU Candle Detection [Mr. Casino SMC]", overlay=true, max_labels_count=500)
+
+// ============================================================================
+// FU (Fakeout) Candle Detection Indicator
+// Based on Mr. Casino's Smart Money Concepts
+// 
+// Types:
+// SFU (Strong FU) = candle takes liquidity then closes opposite direction 
+//                   with Body Inside Wick (BIW)
+// AFU (Attempted FU) = candle takes liquidity but weaker reversal
+// 3 Candle FU = 3 candles: 1st approaches, 2nd breaks liquidity, 3rd reverses
+//
+// Bearish FU: candle goes UP to take liquidity (stops above), closes DOWN
+// Bullish FU: candle goes DOWN to take liquidity (stops below), closes UP
+// ============================================================================
+
+// --- Inputs ---
+lookback        = input.int(20, "Lookback Period for Key Levels", minval=5, maxval=100)
+showSFU         = input.bool(true, "Show Strong FU (SFU)")
+showAFU         = input.bool(true, "Show Attempted FU (AFU)")
+show3CandleFU   = input.bool(true, "Show 3 Candle FU")
+tolerancePct    = input.float(0.01, "Level Tolerance (%)", minval=0.001, maxval=1.0)
+
+// Colors
+colorBullishSFU = input.color(color.new(color.green, 0), "Bullish SFU Color")
+colorBearishSFU = input.color(color.new(color.red, 0), "Bearish SFU Color")
+colorBullishAFU = input.color(color.new(color.lime, 30), "Bullish AFU Color")
+colorBearishAFU = input.color(color.new(color.maroon, 30), "Bearish AFU Color")
+color3CandleBull = input.color(color.new(color.teal, 0), "3 Candle FU Bullish")
+color3CandleBear = input.color(color.new(color.orange, 0), "3 Candle FU Bearish")
+
+// --- Helper Functions ---
+
+// Body size of a candle
+bodySize(idx) =>
+    math.abs(close[idx] - open[idx])
+
+// Upper wick size
+upperWick(idx) =>
+    high[idx] - math.max(close[idx], open[idx])
+
+// Lower wick size
+lowerWick(idx) =>
+    math.min(close[idx], open[idx]) - low[idx]
+
+// Total candle range
+candleRange(idx) =>
+    high[idx] - low[idx]
+
+// Is bullish candle
+isBullish(idx) =>
+    close[idx] > open[idx]
+
+// Is bearish candle
+isBearish(idx) =>
+    close[idx] < open[idx]
+
+// Body Inside Wick (BIW) - body is contained within the wick area
+// For bearish FU: body fits inside upper wick proportion
+// For bullish FU: body fits inside lower wick proportion
+isBIW_Bearish(idx) =>
+    uWick = upperWick(idx)
+    body = bodySize(idx)
+    uWick > 0 and body <= uWick and isBearish(idx)
+
+isBIW_Bullish(idx) =>
+    lWick = lowerWick(idx)
+    body = bodySize(idx)
+    lWick > 0 and body <= lWick and isBullish(idx)
+
+// --- Key Level Detection (Swing Highs and Lows) ---
+swingHigh = ta.pivothigh(high, lookback / 2, lookback / 2)
+swingLow  = ta.pivotlow(low, lookback / 2, lookback / 2)
+
+// Store recent swing levels
+var float recentSwingHigh = na
+var float recentSwingLow  = na
+
+if not na(swingHigh)
+    recentSwingHigh := swingHigh
+if not na(swingLow)
+    recentSwingLow := swingLow
+
+// Tolerance for level breaks
+tolerance = close * tolerancePct / 100
+
+// --- Liquidity Sweep Detection ---
+// Bearish liquidity sweep: price goes above swing high then reverses
+bearishSweep = not na(recentSwingHigh) and high > recentSwingHigh and close < recentSwingHigh
+// Bullish liquidity sweep: price goes below swing low then reverses
+bullishSweep = not na(recentSwingLow) and low < recentSwingLow and close > recentSwingLow
+
+// --- SFU Detection (Strong FU) ---
+// Bearish SFU: sweeps liquidity above, closes bearish, BIW present
+bearishSFU = bearishSweep and isBIW_Bearish(0) and showSFU
+// Bullish SFU: sweeps liquidity below, closes bullish, BIW present
+bullishSFU = bullishSweep and isBIW_Bullish(0) and showSFU
+
+// --- AFU Detection (Attempted FU) ---
+// Bearish AFU: sweeps above, closes bearish but body NOT inside wick (weaker signal)
+bearishAFU = bearishSweep and isBearish(0) and not isBIW_Bearish(0) and showAFU
+// Additional AFU condition: upper wick is larger than body (wick dominance)
+bearishAFU := bearishAFU and upperWick(0) > bodySize(0) * 0.5
+
+// Bullish AFU: sweeps below, closes bullish but body NOT inside wick
+bullishAFU = bullishSweep and isBullish(0) and not isBIW_Bullish(0) and showAFU
+// Additional AFU condition: lower wick is larger than body (wick dominance)
+bullishAFU := bullishAFU and lowerWick(0) > bodySize(0) * 0.5
+
+// --- 3 Candle FU Detection ---
+// Bearish 3 Candle FU:
+// Candle 1 (bar[2]): approaches resistance (high near swing high)
+// Candle 2 (bar[1]): breaks above swing high (takes liquidity)
+// Candle 3 (bar[0]): strong bearish reversal
+bearish3CFU = show3CandleFU and 
+     not na(recentSwingHigh) and
+     high[2] <= recentSwingHigh + tolerance and high[2] >= recentSwingHigh - tolerance and
+     high[1] > recentSwingHigh and
+     isBearish(0) and bodySize(0) > candleRange(0) * 0.5
+
+// Bullish 3 Candle FU:
+// Candle 1 (bar[2]): approaches support (low near swing low)
+// Candle 2 (bar[1]): breaks below swing low (takes liquidity)
+// Candle 3 (bar[0]): strong bullish reversal
+bullish3CFU = show3CandleFU and
+     not na(recentSwingLow) and
+     low[2] >= recentSwingLow - tolerance and low[2] <= recentSwingLow + tolerance and
+     low[1] < recentSwingLow and
+     isBullish(0) and bodySize(0) > candleRange(0) * 0.5
+
+// --- Plotting ---
+// SFU Labels
+if bearishSFU
+    label.new(bar_index, high, "SFU\nBear", style=label.style_label_down, 
+         color=colorBearishSFU, textcolor=color.white, size=size.small)
+
+if bullishSFU
+    label.new(bar_index, low, "SFU\nBull", style=label.style_label_up, 
+         color=colorBullishSFU, textcolor=color.white, size=size.small)
+
+// AFU Labels
+if bearishAFU
+    label.new(bar_index, high, "AFU\nBear", style=label.style_label_down, 
+         color=colorBearishAFU, textcolor=color.white, size=size.tiny)
+
+if bullishAFU
+    label.new(bar_index, low, "AFU\nBull", style=label.style_label_up, 
+         color=colorBullishAFU, textcolor=color.white, size=size.tiny)
+
+// 3 Candle FU Labels
+if bearish3CFU
+    label.new(bar_index, high, "3C-FU\nBear", style=label.style_label_down, 
+         color=color3CandleBear, textcolor=color.white, size=size.small)
+
+if bullish3CFU
+    label.new(bar_index, low, "3C-FU\nBull", style=label.style_label_up, 
+         color=color3CandleBull, textcolor=color.white, size=size.small)
+
+// --- Background highlights for FU candles ---
+bgcolor(bearishSFU ? color.new(color.red, 90) : na, title="Bearish SFU BG")
+bgcolor(bullishSFU ? color.new(color.green, 90) : na, title="Bullish SFU BG")
+
+// --- Alert Conditions ---
+alertcondition(bearishSFU, "Bearish SFU Detected", "Strong Bearish FU Candle - Liquidity Swept Above")
+alertcondition(bullishSFU, "Bullish SFU Detected", "Strong Bullish FU Candle - Liquidity Swept Below")
+alertcondition(bearishAFU, "Bearish AFU Detected", "Attempted Bearish FU Candle")
+alertcondition(bullishAFU, "Bullish AFU Detected", "Attempted Bullish FU Candle")
+alertcondition(bearish3CFU, "Bearish 3 Candle FU", "3 Candle Bearish FU Pattern")
+alertcondition(bullish3CFU, "Bullish 3 Candle FU", "3 Candle Bullish FU Pattern")

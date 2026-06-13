@@ -1,0 +1,209 @@
+//@version=5
+indicator("Order Blocks [Mr. Casino SMC]", overlay=true, max_labels_count=500, max_boxes_on_chart=500)
+
+// ============================================================================
+// Order Block Detection Indicator
+// Based on Mr. Casino's Smart Money Concepts
+//
+// Order Blocks:
+// - Bullish OB: last bearish candle before a strong bullish move
+// - Bearish OB: last bullish candle before a strong bearish move
+//
+// Rules:
+// - OB is valid until price returns and mitigates it
+// - Trade OBs only in direction of HTF trend
+// - Minimum Risk:Reward 1:3
+// ============================================================================
+
+// --- Inputs ---
+obStrength      = input.int(3, "OB Strength (impulse candles)", minval=1, maxval=10)
+impulseMult     = input.float(1.5, "Impulse Size Multiplier", minval=1.0, maxval=5.0)
+showBullOB      = input.bool(true, "Show Bullish Order Blocks")
+showBearOB      = input.bool(true, "Show Bearish Order Blocks")
+showMitigated   = input.bool(false, "Show Mitigated OBs")
+maxOBAge        = input.int(100, "Max OB Age (bars)", minval=20, maxval=500)
+htfFilter       = input.bool(true, "HTF Trend Filter")
+htfTimeframe    = input.timeframe("240", "HTF Timeframe")
+
+// Colors
+colorBullOB     = input.color(color.new(color.green, 70), "Bullish OB Color")
+colorBearOB     = input.color(color.new(color.red, 70), "Bearish OB Color")
+colorMitigated  = input.color(color.new(color.gray, 85), "Mitigated OB Color")
+
+// --- Helper Functions ---
+bodySize(idx) =>
+    math.abs(close[idx] - open[idx])
+
+candleRange(idx) =>
+    high[idx] - low[idx]
+
+isBullish(idx) =>
+    close[idx] > open[idx]
+
+isBearish(idx) =>
+    close[idx] < open[idx]
+
+// Average body size for reference
+avgBody = ta.sma(bodySize(0), 20)
+
+// --- HTF Trend ---
+htfClose = request.security(syminfo.tickerid, htfTimeframe, close)
+htfEMA20 = request.security(syminfo.tickerid, htfTimeframe, ta.ema(close, 20))
+htfBullish = htfClose > htfEMA20
+htfBearish = htfClose < htfEMA20
+
+// --- Impulse Move Detection ---
+// Bullish impulse: strong upward move after a bearish candle
+bullishImpulse() =>
+    impulseSize = 0.0
+    for i = 0 to obStrength - 1
+        if isBullish(i)
+            impulseSize += bodySize(i)
+        else
+            impulseSize := 0
+            break
+    impulseSize > avgBody * impulseMult * obStrength
+
+// Bearish impulse: strong downward move after a bullish candle
+bearishImpulse() =>
+    impulseSize = 0.0
+    for i = 0 to obStrength - 1
+        if isBearish(i)
+            impulseSize += bodySize(i)
+        else
+            impulseSize := 0
+            break
+    impulseSize > avgBody * impulseMult * obStrength
+
+// --- Order Block Detection ---
+// Bullish OB: last bearish candle before bullish impulse
+bullOBDetected = showBullOB and isBearish(obStrength) and bullishImpulse()
+// Apply HTF filter if enabled
+bullOBDetected := bullOBDetected and (not htfFilter or htfBullish)
+
+// Bearish OB: last bullish candle before bearish impulse
+bearOBDetected = showBearOB and isBullish(obStrength) and bearishImpulse()
+// Apply HTF filter if enabled
+bearOBDetected := bearOBDetected and (not htfFilter or htfBearish)
+
+// --- OB Tracking (store active OBs) ---
+// Using arrays to track active order blocks
+var float[] bullOBTop = array.new_float(0)
+var float[] bullOBBot = array.new_float(0)
+var int[] bullOBBar = array.new_int(0)
+var box[] bullOBBox = array.new_box(0)
+
+var float[] bearOBTop = array.new_float(0)
+var float[] bearOBBot = array.new_float(0)
+var int[] bearOBBar = array.new_int(0)
+var box[] bearOBBox = array.new_box(0)
+
+// --- Add new Bullish OBs ---
+if bullOBDetected
+    obTop = high[obStrength]
+    obBot = low[obStrength]
+    obBarIdx = bar_index - obStrength
+    
+    newBox = box.new(obBarIdx, obTop, bar_index + 20, obBot, 
+         border_color=colorBullOB, bgcolor=colorBullOB)
+    
+    array.push(bullOBTop, obTop)
+    array.push(bullOBBot, obBot)
+    array.push(bullOBBar, obBarIdx)
+    array.push(bullOBBox, newBox)
+    
+    label.new(obBarIdx, obBot, "Bull OB", style=label.style_label_up, 
+         color=color.new(color.green, 0), textcolor=color.white, size=size.tiny)
+
+// --- Add new Bearish OBs ---
+if bearOBDetected
+    obTop = high[obStrength]
+    obBot = low[obStrength]
+    obBarIdx = bar_index - obStrength
+    
+    newBox = box.new(obBarIdx, obTop, bar_index + 20, obBot, 
+         border_color=colorBearOB, bgcolor=colorBearOB)
+    
+    array.push(bearOBTop, obTop)
+    array.push(bearOBBot, obBot)
+    array.push(bearOBBar, obBarIdx)
+    array.push(bearOBBox, newBox)
+    
+    label.new(obBarIdx, obTop, "Bear OB", style=label.style_label_down, 
+         color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+
+// --- Mitigation Check (OB is mitigated when price passes through it) ---
+// Check Bullish OBs
+if array.size(bullOBTop) > 0
+    for i = array.size(bullOBTop) - 1 to 0
+        if i < array.size(bullOBTop)
+            top = array.get(bullOBTop, i)
+            bot = array.get(bullOBBot, i)
+            barIdx = array.get(bullOBBar, i)
+            bx = array.get(bullOBBox, i)
+            
+            // Mitigated if price closes below OB bottom
+            mitigated = close < bot
+            // Too old
+            tooOld = (bar_index - barIdx) > maxOBAge
+            
+            if mitigated or tooOld
+                if showMitigated and mitigated
+                    box.set_bgcolor(bx, colorMitigated)
+                    box.set_border_color(bx, colorMitigated)
+                else
+                    box.delete(bx)
+                array.remove(bullOBTop, i)
+                array.remove(bullOBBot, i)
+                array.remove(bullOBBar, i)
+                array.remove(bullOBBox, i)
+            else
+                // Extend the box to current bar
+                box.set_right(bx, bar_index + 5)
+
+// Check Bearish OBs
+if array.size(bearOBTop) > 0
+    for i = array.size(bearOBTop) - 1 to 0
+        if i < array.size(bearOBTop)
+            top = array.get(bearOBTop, i)
+            bot = array.get(bearOBBot, i)
+            barIdx = array.get(bearOBBar, i)
+            bx = array.get(bearOBBox, i)
+            
+            // Mitigated if price closes above OB top
+            mitigated = close > top
+            // Too old
+            tooOld = (bar_index - barIdx) > maxOBAge
+            
+            if mitigated or tooOld
+                if showMitigated and mitigated
+                    box.set_bgcolor(bx, colorMitigated)
+                    box.set_border_color(bx, colorMitigated)
+                else
+                    box.delete(bx)
+                array.remove(bearOBTop, i)
+                array.remove(bearOBBot, i)
+                array.remove(bearOBBar, i)
+                array.remove(bearOBBox, i)
+            else
+                // Extend the box to current bar
+                box.set_right(bx, bar_index + 5)
+
+// --- Info Table ---
+var table infoTable = table.new(position.top_right, 2, 4, bgcolor=color.new(color.black, 80))
+if barstate.islast
+    htfText = htfBullish ? "BULLISH" : htfBearish ? "BEARISH" : "NEUTRAL"
+    htfCol = htfBullish ? color.green : htfBearish ? color.red : color.gray
+    
+    table.cell(infoTable, 0, 0, "HTF Bias:", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 0, htfText, text_color=htfCol, text_size=size.small)
+    table.cell(infoTable, 0, 1, "Active Bull OBs:", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 1, str.tostring(array.size(bullOBTop)), text_color=color.green, text_size=size.small)
+    table.cell(infoTable, 0, 2, "Active Bear OBs:", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 2, str.tostring(array.size(bearOBTop)), text_color=color.red, text_size=size.small)
+    table.cell(infoTable, 0, 3, "Min RR:", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 3, "1:3", text_color=color.yellow, text_size=size.small)
+
+// --- Alert Conditions ---
+alertcondition(bullOBDetected, "Bullish OB Formed", "New Bullish Order Block Detected")
+alertcondition(bearOBDetected, "Bearish OB Formed", "New Bearish Order Block Detected")

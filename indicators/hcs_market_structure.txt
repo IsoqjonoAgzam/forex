@@ -1,0 +1,149 @@
+//@version=5
+indicator("HCS Market Structure [Mr. Casino SMC]", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ============================================================================
+// HCS (Higher Close Structure) / Market Structure Indicator
+// Based on Mr. Casino's Smart Money Concepts
+//
+// Detects:
+// - Bullish HCS: series of higher candle closes (uptrend)
+// - Bearish HCS: series of lower candle closes (downtrend)
+// - HCS Negation: when structure breaks (trend change signal)
+//
+// Rules:
+// - Only trade in direction of HTF (4H/Daily) trend
+// - HCS break = potential trend change
+// ============================================================================
+
+// --- Inputs ---
+hcsLength       = input.int(3, "HCS Consecutive Closes", minval=2, maxval=10)
+showHCS         = input.bool(true, "Show HCS Labels")
+showNegation    = input.bool(true, "Show HCS Negation (Break)")
+showStructure   = input.bool(true, "Show Structure Lines")
+showHTFBias     = input.bool(true, "Show HTF Bias")
+htfTimeframe    = input.timeframe("240", "HTF Timeframe (for bias)")
+
+// Colors
+colorBullHCS    = input.color(color.new(color.green, 0), "Bullish HCS Color")
+colorBearHCS    = input.color(color.new(color.red, 0), "Bearish HCS Color")
+colorNegation   = input.color(color.new(color.yellow, 0), "Negation Color")
+
+// --- HCS Detection ---
+// Count consecutive higher closes
+higherCloses() =>
+    count = 0
+    for i = 0 to hcsLength - 2
+        if close[i] > close[i + 1]
+            count += 1
+        else
+            break
+    count
+
+// Count consecutive lower closes
+lowerCloses() =>
+    count = 0
+    for i = 0 to hcsLength - 2
+        if close[i] < close[i + 1]
+            count += 1
+        else
+            break
+    count
+
+hcBullCount = higherCloses()
+hcBearCount = lowerCloses()
+
+// HCS confirmed when we have enough consecutive closes
+bullishHCS = hcBullCount >= hcsLength - 1
+bearishHCS = hcBearCount >= hcsLength - 1
+
+// --- Track current structure ---
+var int currentStructure = 0  // 1 = bullish, -1 = bearish, 0 = neutral
+var float structureHigh = na
+var float structureLow = na
+var float lastBullishClose = na
+var float lastBearishClose = na
+
+if bullishHCS
+    currentStructure := 1
+    structureLow := low[hcsLength - 1]
+    lastBullishClose := close
+
+if bearishHCS
+    currentStructure := -1
+    structureHigh := high[hcsLength - 1]
+    lastBearishClose := close
+
+// --- HCS Negation Detection ---
+// Bullish HCS negated: price closes below the structure low
+bullishNegation = currentStructure == 1 and not na(structureLow) and close < structureLow
+// Bearish HCS negated: price closes above the structure high
+bearishNegation = currentStructure == -1 and not na(structureHigh) and close > structureHigh
+
+// Reset structure on negation
+if bullishNegation
+    currentStructure := 0
+    structureLow := na
+
+if bearishNegation
+    currentStructure := 0
+    structureHigh := na
+
+// --- HTF Bias ---
+htfClose = request.security(syminfo.tickerid, htfTimeframe, close)
+htfOpen  = request.security(syminfo.tickerid, htfTimeframe, open)
+htfClose_prev = request.security(syminfo.tickerid, htfTimeframe, close[1])
+
+htfBullish = htfClose > htfClose_prev
+htfBearish = htfClose < htfClose_prev
+
+// --- Plotting HCS ---
+if bullishHCS and showHCS
+    label.new(bar_index, low, "HCS\nBull", style=label.style_label_up, 
+         color=colorBullHCS, textcolor=color.white, size=size.tiny)
+
+if bearishHCS and showHCS
+    label.new(bar_index, high, "HCS\nBear", style=label.style_label_down, 
+         color=colorBearHCS, textcolor=color.white, size=size.tiny)
+
+// --- Plotting Negation ---
+if bullishNegation and showNegation
+    label.new(bar_index, high, "HCS\nNEGATED", style=label.style_label_down, 
+         color=colorNegation, textcolor=color.black, size=size.small)
+    // Draw line at broken structure level
+    if showStructure
+        line.new(bar_index - 10, structureLow, bar_index, structureLow, 
+             color=colorNegation, style=line.style_dotted, width=2)
+
+if bearishNegation and showNegation
+    label.new(bar_index, low, "HCS\nNEGATED", style=label.style_label_up, 
+         color=colorNegation, textcolor=color.black, size=size.small)
+    if showStructure
+        line.new(bar_index - 10, structureHigh, bar_index, structureHigh, 
+             color=colorNegation, style=line.style_dotted, width=2)
+
+// --- HTF Bias Display ---
+var label htfLabel = na
+if showHTFBias
+    if not na(htfLabel)
+        label.delete(htfLabel)
+    biasText = htfBullish ? "HTF BIAS: BULLISH" : htfBearish ? "HTF BIAS: BEARISH" : "HTF BIAS: NEUTRAL"
+    biasColor = htfBullish ? colorBullHCS : htfBearish ? colorBearHCS : color.gray
+    htfLabel := label.new(bar_index + 5, close, biasText, style=label.style_label_left, 
+         color=biasColor, textcolor=color.white, size=size.normal)
+
+// --- Structure Background ---
+structureColor = currentStructure == 1 ? color.new(color.green, 95) : 
+     currentStructure == -1 ? color.new(color.red, 95) : na
+bgcolor(structureColor, title="Structure Background")
+
+// --- Plot current structure state ---
+plot(showStructure and not na(structureLow) and currentStructure == 1 ? structureLow : na, 
+     "Structure Low", color=colorBullHCS, style=plot.style_linebr, linewidth=1)
+plot(showStructure and not na(structureHigh) and currentStructure == -1 ? structureHigh : na, 
+     "Structure High", color=colorBearHCS, style=plot.style_linebr, linewidth=1)
+
+// --- Alert Conditions ---
+alertcondition(bullishHCS, "Bullish HCS", "Bullish Higher Close Structure Confirmed")
+alertcondition(bearishHCS, "Bearish HCS", "Bearish Lower Close Structure Confirmed")
+alertcondition(bullishNegation, "Bullish HCS Negated", "Bullish Structure Broken - Trend Change")
+alertcondition(bearishNegation, "Bearish HCS Negated", "Bearish Structure Broken - Trend Change")

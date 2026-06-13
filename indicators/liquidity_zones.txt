@@ -1,0 +1,141 @@
+//@version=5
+indicator("Liquidity Zone Detection [Mr. Casino SMC]", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ============================================================================
+// Liquidity Zone Detection Indicator
+// Based on Mr. Casino's Smart Money Concepts
+//
+// Detects:
+// - Equal Highs (EQH) = sell-side liquidity pools
+// - Equal Lows (EQL) = buy-side liquidity pools
+// - Doji Candles = manipulation targets
+// - Large Unfilled Wicks = zones that price will return to fill
+// ============================================================================
+
+// --- Inputs ---
+eqTolerance     = input.float(0.05, "Equal Level Tolerance (%)", minval=0.01, maxval=1.0, step=0.01)
+eqLookback      = input.int(3, "Min Candles for Equal Level", minval=2, maxval=10)
+showEQH         = input.bool(true, "Show Equal Highs (EQH)")
+showEQL         = input.bool(true, "Show Equal Lows (EQL)")
+showDoji        = input.bool(true, "Show Doji Targets")
+showUnfilled    = input.bool(true, "Show Unfilled Wicks")
+wickMultiplier  = input.float(2.0, "Wick Size Multiplier (vs Body)", minval=1.0, maxval=5.0)
+dojiBodyPct     = input.float(10.0, "Doji Max Body (% of Range)", minval=1.0, maxval=30.0)
+extendBars      = input.int(50, "Extend Lines (bars)", minval=10, maxval=200)
+
+// Colors
+colorEQH        = input.color(color.new(color.red, 20), "EQH Line Color")
+colorEQL        = input.color(color.new(color.green, 20), "EQL Line Color")
+colorDoji       = input.color(color.new(color.purple, 30), "Doji Color")
+colorWickBull   = input.color(color.new(color.green, 40), "Unfilled Wick Bull")
+colorWickBear   = input.color(color.new(color.red, 40), "Unfilled Wick Bear")
+
+// --- Helper Functions ---
+bodySize() =>
+    math.abs(close - open)
+
+candleRange() =>
+    high - low
+
+upperWick() =>
+    high - math.max(close, open)
+
+lowerWick() =>
+    math.min(close, open) - low
+
+// --- Equal Highs Detection ---
+// Multiple candles with highs at approximately the same level
+isEqualHigh() =>
+    tol = high * eqTolerance / 100
+    count = 0
+    refHigh = high
+    for i = 1 to eqLookback
+        if math.abs(high[i] - refHigh) <= tol
+            count += 1
+    count >= eqLookback - 1
+
+// --- Equal Lows Detection ---
+isEqualLow() =>
+    tol = low * eqTolerance / 100
+    count = 0
+    refLow = low
+    for i = 1 to eqLookback
+        if math.abs(low[i] - refLow) <= tol
+            count += 1
+    count >= eqLookback - 1
+
+// --- Doji Detection ---
+// Doji = very small body relative to total range (manipulation target)
+isDoji() =>
+    range_val = candleRange()
+    body = bodySize()
+    range_val > 0 and (body / range_val * 100) <= dojiBodyPct and range_val > 0
+
+// --- Large Unfilled Wick Detection ---
+// Upper wick is significantly larger than body
+hasLargeUpperWick() =>
+    body = bodySize()
+    uWick = upperWick()
+    body > 0 and uWick >= body * wickMultiplier
+
+// Lower wick is significantly larger than body
+hasLargeLowerWick() =>
+    body = bodySize()
+    lWick = lowerWick()
+    body > 0 and lWick >= body * wickMultiplier
+
+// --- Detection Logic ---
+eqHighDetected = showEQH and isEqualHigh()
+eqLowDetected  = showEQL and isEqualLow()
+dojiDetected   = showDoji and isDoji()
+largeUpperWick = showUnfilled and hasLargeUpperWick()
+largeLowerWick = showUnfilled and hasLargeLowerWick()
+
+// --- Plotting Equal Highs ---
+if eqHighDetected
+    // Draw a horizontal line at the equal high level
+    eqhLine = line.new(bar_index - eqLookback, high, bar_index + extendBars, high, 
+         color=colorEQH, style=line.style_dashed, width=2)
+    label.new(bar_index, high, "EQH\nSell Liq", style=label.style_label_down, 
+         color=colorEQH, textcolor=color.white, size=size.tiny)
+
+// --- Plotting Equal Lows ---
+if eqLowDetected
+    // Draw a horizontal line at the equal low level
+    eqlLine = line.new(bar_index - eqLookback, low, bar_index + extendBars, low, 
+         color=colorEQL, style=line.style_dashed, width=2)
+    label.new(bar_index, low, "EQL\nBuy Liq", style=label.style_label_up, 
+         color=colorEQL, textcolor=color.white, size=size.tiny)
+
+// --- Plotting Doji Targets ---
+if dojiDetected
+    label.new(bar_index, high, "DOJI", style=label.style_diamond, 
+         color=colorDoji, textcolor=color.white, size=size.tiny)
+
+// --- Plotting Unfilled Wicks ---
+if largeUpperWick
+    // Zone from candle body top to wick high (unfilled area)
+    bodyTop = math.max(close, open)
+    box.new(bar_index, high, bar_index + extendBars, bodyTop, 
+         border_color=colorWickBear, bgcolor=color.new(colorWickBear, 85))
+    label.new(bar_index, high, "UW", style=label.style_label_down, 
+         color=colorWickBear, textcolor=color.white, size=size.tiny)
+
+if largeLowerWick
+    // Zone from candle body bottom to wick low (unfilled area)
+    bodyBottom = math.min(close, open)
+    box.new(bar_index, bodyBottom, bar_index + extendBars, low, 
+         border_color=colorWickBull, bgcolor=color.new(colorWickBull, 85))
+    label.new(bar_index, low, "UW", style=label.style_label_up, 
+         color=colorWickBull, textcolor=color.white, size=size.tiny)
+
+// --- Background for Equal Levels ---
+bgcolor(eqHighDetected ? color.new(color.red, 95) : na, title="EQH Background")
+bgcolor(eqLowDetected ? color.new(color.green, 95) : na, title="EQL Background")
+
+// --- Alert Conditions ---
+alertcondition(eqHighDetected, "Equal Highs Detected", "Equal Highs - Sell Side Liquidity Pool")
+alertcondition(eqLowDetected, "Equal Lows Detected", "Equal Lows - Buy Side Liquidity Pool")
+alertcondition(dojiDetected, "Doji Target", "Doji Candle - Potential Manipulation Target")
+alertcondition(largeUpperWick, "Large Upper Wick", "Unfilled Upper Wick Zone")
+alertcondition(largeLowerWick, "Large Lower Wick", "Unfilled Lower Wick Zone")
