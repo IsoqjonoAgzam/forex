@@ -1,5 +1,5 @@
 //@version=5
-indicator("MR. CASINO SMC COMPLETE [All-In-One]", overlay=true, max_labels_count=500, max_boxes_on_chart=500, max_lines_count=500)
+indicator("MR. CASINO SMC COMPLETE [All-In-One]", overlay=true, max_labels_count=500, max_boxes_count=500, max_lines_count=500)
 
 // ============================================================================
 // MR. CASINO - SMART MONEY CONCEPTS - COMPLETE INDICATOR
