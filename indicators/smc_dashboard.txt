@@ -1,0 +1,469 @@
+//@version=5
+indicator("SMC Signal Dashboard [Mr. Casino]", overlay=true, max_labels_count=500, max_boxes_on_chart=500, max_lines_count=500)
+
+// ============================================================================
+// Smart Money Concepts - Signal Dashboard with 1 Week Performance Tracking
+// Based on Mr. Casino's Books
+//
+// Features:
+// - All SMC signals (FU, OB, Liquidity, HCS) displayed on chart
+// - Past 1 week signals remain visible on chart
+// - Corner dashboard showing:
+//   * Total entries in last 7 days
+//   * Win rate (TP hit percentage)
+//   * Loss rate (SL hit percentage)  
+//   * Profit/Loss statistics
+//   * Active signals count
+//
+// Trading Rules:
+// - Only trade in direction of HTF (4H/Daily) trend
+// - Risk:Reward minimum 1:3
+// - Max risk per trade: 1-3%
+// ============================================================================
+
+// =================== INPUTS ===================
+grpGeneral = "General Settings"
+htfFilter       = input.bool(true, "Enable HTF Trend Filter", group=grpGeneral)
+htfTimeframe    = input.timeframe("240", "HTF Timeframe", group=grpGeneral)
+rrRatio         = input.float(3.0, "Risk:Reward Ratio", minval=1.0, maxval=10.0, group=grpGeneral)
+riskPct         = input.float(2.0, "Risk Per Trade (%)", minval=0.5, maxval=5.0, group=grpGeneral)
+atrLength       = input.int(14, "ATR Length (for SL/TP)", minval=5, maxval=50, group=grpGeneral)
+atrMult         = input.float(1.5, "ATR Multiplier for SL", minval=0.5, maxval=5.0, group=grpGeneral)
+
+grpFU = "FU Candle Settings"
+showFU          = input.bool(true, "Enable FU Detection", group=grpFU)
+fuLookback      = input.int(20, "FU Lookback (Key Levels)", minval=5, maxval=100, group=grpFU)
+
+grpOB = "Order Block Settings"
+showOB          = input.bool(true, "Enable Order Blocks", group=grpOB)
+obStrength      = input.int(3, "OB Strength (impulse candles)", minval=1, maxval=10, group=grpOB)
+obImpulseMult   = input.float(1.5, "Impulse Size Multiplier", minval=1.0, maxval=5.0, group=grpOB)
+
+grpLiq = "Liquidity Settings"
+showLiquidity   = input.bool(true, "Enable Liquidity Zones", group=grpLiq)
+eqTolerance     = input.float(0.05, "Equal Level Tolerance (%)", minval=0.01, maxval=1.0, group=grpLiq)
+eqLookback      = input.int(3, "Min Candles for Equal Level", minval=2, maxval=10, group=grpLiq)
+
+grpHCS = "HCS Structure Settings"
+showHCS         = input.bool(true, "Enable HCS Structure", group=grpHCS)
+hcsLength       = input.int(3, "HCS Consecutive Closes", minval=2, maxval=10, group=grpHCS)
+
+// =================== HELPER FUNCTIONS ===================
+bodySize(idx) =>
+    math.abs(close[idx] - open[idx])
+
+candleRange(idx) =>
+    high[idx] - low[idx]
+
+upperWick(idx) =>
+    high[idx] - math.max(close[idx], open[idx])
+
+lowerWick(idx) =>
+    math.min(close[idx], open[idx]) - low[idx]
+
+isBullish(idx) =>
+    close[idx] > open[idx]
+
+isBearish(idx) =>
+    close[idx] < open[idx]
+
+isBIW_Bearish(idx) =>
+    uWick = upperWick(idx)
+    body = bodySize(idx)
+    uWick > 0 and body <= uWick and isBearish(idx)
+
+isBIW_Bullish(idx) =>
+    lWick = lowerWick(idx)
+    body = bodySize(idx)
+    lWick > 0 and body <= lWick and isBullish(idx)
+
+avgBody = ta.sma(bodySize(0), 20)
+atrVal = ta.atr(atrLength)
+
+// =================== TIME TRACKING (1 WEEK) ===================
+// Calculate if bar is within last 7 days (1 week = 604800000 milliseconds)
+oneWeekMs = 7 * 24 * 60 * 60 * 1000
+isWithinOneWeek = (timenow - time) <= oneWeekMs
+
+// =================== HTF TREND FILTER ===================
+htfClose = request.security(syminfo.tickerid, htfTimeframe, close)
+htfEMA20 = request.security(syminfo.tickerid, htfTimeframe, ta.ema(close, 20))
+htfBullish = htfClose > htfEMA20
+htfBearish = htfClose < htfEMA20
+
+// =================== FU CANDLE DETECTION ===================
+swingHigh = ta.pivothigh(high, fuLookback / 2, fuLookback / 2)
+swingLow  = ta.pivotlow(low, fuLookback / 2, fuLookback / 2)
+
+var float recentSwingHigh = na
+var float recentSwingLow  = na
+
+if not na(swingHigh)
+    recentSwingHigh := swingHigh
+if not na(swingLow)
+    recentSwingLow := swingLow
+
+bearishSweep = not na(recentSwingHigh) and high > recentSwingHigh and close < recentSwingHigh
+bullishSweep = not na(recentSwingLow) and low < recentSwingLow and close > recentSwingLow
+
+// SFU Detection
+bearishSFU = showFU and bearishSweep and isBIW_Bearish(0)
+bullishSFU = showFU and bullishSweep and isBIW_Bullish(0)
+bearishSFU := bearishSFU and (not htfFilter or htfBearish)
+bullishSFU := bullishSFU and (not htfFilter or htfBullish)
+
+// AFU Detection
+bearishAFU = showFU and bearishSweep and isBearish(0) and not isBIW_Bearish(0) and upperWick(0) > bodySize(0) * 0.5
+bullishAFU = showFU and bullishSweep and isBullish(0) and not isBIW_Bullish(0) and lowerWick(0) > bodySize(0) * 0.5
+bearishAFU := bearishAFU and (not htfFilter or htfBearish)
+bullishAFU := bullishAFU and (not htfFilter or htfBullish)
+
+// =================== ORDER BLOCKS ===================
+bullishImpulse() =>
+    impulseSize = 0.0
+    for i = 0 to obStrength - 1
+        if isBullish(i)
+            impulseSize += bodySize(i)
+        else
+            impulseSize := 0
+            break
+    impulseSize > avgBody * obImpulseMult * obStrength
+
+bearishImpulse() =>
+    impulseSize = 0.0
+    for i = 0 to obStrength - 1
+        if isBearish(i)
+            impulseSize += bodySize(i)
+        else
+            impulseSize := 0
+            break
+    impulseSize > avgBody * obImpulseMult * obStrength
+
+bullOBDetected = showOB and isBearish(obStrength) and bullishImpulse()
+bearOBDetected = showOB and isBullish(obStrength) and bearishImpulse()
+bullOBDetected := bullOBDetected and (not htfFilter or htfBullish)
+bearOBDetected := bearOBDetected and (not htfFilter or htfBearish)
+
+// =================== HCS STRUCTURE ===================
+higherCloses() =>
+    count = 0
+    for i = 0 to hcsLength - 2
+        if close[i] > close[i + 1]
+            count += 1
+        else
+            break
+    count
+
+lowerCloses() =>
+    count = 0
+    for i = 0 to hcsLength - 2
+        if close[i] < close[i + 1]
+            count += 1
+        else
+            break
+    count
+
+bullishHCS = showHCS and higherCloses() >= hcsLength - 1
+bearishHCS = showHCS and lowerCloses() >= hcsLength - 1
+
+var int currentStructure = 0
+var float structureHigh = na
+var float structureLow = na
+
+if bullishHCS
+    currentStructure := 1
+    structureLow := low[hcsLength - 1]
+
+if bearishHCS
+    currentStructure := -1
+    structureHigh := high[hcsLength - 1]
+
+bullishNegation = showHCS and currentStructure == 1 and not na(structureLow) and close < structureLow
+bearishNegation = showHCS and currentStructure == -1 and not na(structureHigh) and close > structureHigh
+
+if bullishNegation
+    currentStructure := 0
+    structureLow := na
+if bearishNegation
+    currentStructure := 0
+    structureHigh := na
+
+// =================== LIQUIDITY ZONES ===================
+isEqualHigh() =>
+    tol = high * eqTolerance / 100
+    count = 0
+    for i = 1 to eqLookback
+        if math.abs(high[i] - high) <= tol
+            count += 1
+    count >= eqLookback - 1
+
+isEqualLow() =>
+    tol = low * eqTolerance / 100
+    count = 0
+    for i = 1 to eqLookback
+        if math.abs(low[i] - low) <= tol
+            count += 1
+    count >= eqLookback - 1
+
+eqHighDetected = showLiquidity and isEqualHigh()
+eqLowDetected  = showLiquidity and isEqualLow()
+
+// =================== COMBINED ENTRY SIGNAL ===================
+// Strong entry = SFU + confirmed by structure direction
+bullEntry = bullishSFU or (bullOBDetected and currentStructure == 1)
+bearEntry = bearishSFU or (bearOBDetected and currentStructure == -1)
+
+// Any signal (for counting)
+anyBullSignal = bullishSFU or bullishAFU or bullOBDetected
+anyBearSignal = bearishSFU or bearishAFU or bearOBDetected
+
+// =================== SL/TP CALCULATION ===================
+// For bull entries: SL below low, TP = entry + (entry - SL) * RR
+bullSL = low - atrVal * atrMult
+bullTP = close + (close - bullSL) * rrRatio
+
+// For bear entries: SL above high, TP = entry - (SL - entry) * RR
+bearSL = high + atrVal * atrMult
+bearTP = close - (bearSL - close) * rrRatio
+
+// =================== PERFORMANCE TRACKING (1 WEEK) ===================
+// Track entries and outcomes within the last week
+var int weekBullEntries = 0
+var int weekBearEntries = 0
+var int weekTPHit = 0
+var int weekSLHit = 0
+var float weekProfit = 0.0
+var float weekLoss = 0.0
+
+// Track active trades
+var float[] activeBullEntry = array.new_float(0)
+var float[] activeBullSL = array.new_float(0)
+var float[] activeBullTP = array.new_float(0)
+var int[] activeBullTime = array.new_int(0)
+
+var float[] activeBearEntry = array.new_float(0)
+var float[] activeBearSL = array.new_float(0)
+var float[] activeBearTP = array.new_float(0)
+var int[] activeBearTime = array.new_int(0)
+
+// Reset weekly counters at start of new week
+newWeek = ta.change(time("W")) != 0
+if newWeek
+    weekBullEntries := 0
+    weekBearEntries := 0
+    weekTPHit := 0
+    weekSLHit := 0
+    weekProfit := 0.0
+    weekLoss := 0.0
+
+// Record new bull entries
+if bullEntry and isWithinOneWeek
+    weekBullEntries += 1
+    array.push(activeBullEntry, close)
+    array.push(activeBullSL, bullSL)
+    array.push(activeBullTP, bullTP)
+    array.push(activeBullTime, time)
+
+// Record new bear entries
+if bearEntry and isWithinOneWeek
+    weekBearEntries += 1
+    array.push(activeBearEntry, close)
+    array.push(activeBearSL, bearSL)
+    array.push(activeBearTP, bearTP)
+    array.push(activeBearTime, time)
+
+// Check bull trades for TP/SL hit
+if array.size(activeBullEntry) > 0
+    for i = array.size(activeBullEntry) - 1 to 0
+        if i < array.size(activeBullEntry)
+            entryPrice = array.get(activeBullEntry, i)
+            slPrice = array.get(activeBullSL, i)
+            tpPrice = array.get(activeBullTP, i)
+            tradeTime = array.get(activeBullTime, i)
+            
+            // Only process trades from this week
+            if (timenow - tradeTime) <= oneWeekMs
+                // TP hit
+                if high >= tpPrice
+                    weekTPHit += 1
+                    weekProfit += (tpPrice - entryPrice) / entryPrice * 100
+                    array.remove(activeBullEntry, i)
+                    array.remove(activeBullSL, i)
+                    array.remove(activeBullTP, i)
+                    array.remove(activeBullTime, i)
+                // SL hit
+                else if low <= slPrice
+                    weekSLHit += 1
+                    weekLoss += (entryPrice - slPrice) / entryPrice * 100
+                    array.remove(activeBullEntry, i)
+                    array.remove(activeBullSL, i)
+                    array.remove(activeBullTP, i)
+                    array.remove(activeBullTime, i)
+            else
+                // Remove old trades (older than 1 week)
+                array.remove(activeBullEntry, i)
+                array.remove(activeBullSL, i)
+                array.remove(activeBullTP, i)
+                array.remove(activeBullTime, i)
+
+// Check bear trades for TP/SL hit
+if array.size(activeBearEntry) > 0
+    for i = array.size(activeBearEntry) - 1 to 0
+        if i < array.size(activeBearEntry)
+            entryPrice = array.get(activeBearEntry, i)
+            slPrice = array.get(activeBearSL, i)
+            tpPrice = array.get(activeBearTP, i)
+            tradeTime = array.get(activeBearTime, i)
+            
+            if (timenow - tradeTime) <= oneWeekMs
+                // TP hit (price goes down to TP)
+                if low <= tpPrice
+                    weekTPHit += 1
+                    weekProfit += (entryPrice - tpPrice) / entryPrice * 100
+                    array.remove(activeBearEntry, i)
+                    array.remove(activeBearSL, i)
+                    array.remove(activeBearTP, i)
+                    array.remove(activeBearTime, i)
+                // SL hit (price goes up to SL)
+                else if high >= slPrice
+                    weekSLHit += 1
+                    weekLoss += (slPrice - entryPrice) / entryPrice * 100
+                    array.remove(activeBearEntry, i)
+                    array.remove(activeBearSL, i)
+                    array.remove(activeBearTP, i)
+                    array.remove(activeBearTime, i)
+            else
+                array.remove(activeBearEntry, i)
+                array.remove(activeBearSL, i)
+                array.remove(activeBearTP, i)
+                array.remove(activeBearTime, i)
+
+// =================== SIGNAL LABELS (persist for 1 week) ===================
+// Only plot signals within the last week so they remain visible
+if bullishSFU and isWithinOneWeek
+    label.new(bar_index, low, "SFU\nBUY", style=label.style_label_up, 
+         color=color.green, textcolor=color.white, size=size.small)
+    // Draw SL and TP lines
+    line.new(bar_index, bullSL, bar_index + 10, bullSL, color=color.red, style=line.style_dotted, width=1)
+    line.new(bar_index, bullTP, bar_index + 10, bullTP, color=color.green, style=line.style_dotted, width=1)
+
+if bearishSFU and isWithinOneWeek
+    label.new(bar_index, high, "SFU\nSELL", style=label.style_label_down, 
+         color=color.red, textcolor=color.white, size=size.small)
+    line.new(bar_index, bearSL, bar_index + 10, bearSL, color=color.red, style=line.style_dotted, width=1)
+    line.new(bar_index, bearTP, bar_index + 10, bearTP, color=color.green, style=line.style_dotted, width=1)
+
+if bullishAFU and isWithinOneWeek
+    label.new(bar_index, low, "AFU\nBUY", style=label.style_label_up, 
+         color=color.new(color.green, 30), textcolor=color.white, size=size.tiny)
+
+if bearishAFU and isWithinOneWeek
+    label.new(bar_index, high, "AFU\nSELL", style=label.style_label_down, 
+         color=color.new(color.red, 30), textcolor=color.white, size=size.tiny)
+
+if bullOBDetected and isWithinOneWeek
+    label.new(bar_index - obStrength, low[obStrength], "OB\nBUY", style=label.style_label_up, 
+         color=color.new(color.teal, 0), textcolor=color.white, size=size.small)
+    // OB zone box
+    box.new(bar_index - obStrength, high[obStrength], bar_index + 20, low[obStrength], 
+         border_color=color.new(color.green, 50), bgcolor=color.new(color.green, 88))
+
+if bearOBDetected and isWithinOneWeek
+    label.new(bar_index - obStrength, high[obStrength], "OB\nSELL", style=label.style_label_down, 
+         color=color.new(color.orange, 0), textcolor=color.white, size=size.small)
+    box.new(bar_index - obStrength, high[obStrength], bar_index + 20, low[obStrength], 
+         border_color=color.new(color.red, 50), bgcolor=color.new(color.red, 88))
+
+if bullishNegation and isWithinOneWeek
+    label.new(bar_index, high, "BOS\nUP", style=label.style_label_down, 
+         color=color.yellow, textcolor=color.black, size=size.small)
+
+if bearishNegation and isWithinOneWeek
+    label.new(bar_index, low, "BOS\nDOWN", style=label.style_label_up, 
+         color=color.yellow, textcolor=color.black, size=size.small)
+
+if eqHighDetected and isWithinOneWeek
+    line.new(bar_index - eqLookback, high, bar_index + 50, high, 
+         color=color.new(color.red, 30), style=line.style_dashed, width=2)
+    label.new(bar_index, high, "EQH", style=label.style_label_down, 
+         color=color.new(color.red, 30), textcolor=color.white, size=size.tiny)
+
+if eqLowDetected and isWithinOneWeek
+    line.new(bar_index - eqLookback, low, bar_index + 50, low, 
+         color=color.new(color.green, 30), style=line.style_dashed, width=2)
+    label.new(bar_index, low, "EQL", style=label.style_label_up, 
+         color=color.new(color.green, 30), textcolor=color.white, size=size.tiny)
+
+// =================== PERFORMANCE DASHBOARD (TOP RIGHT CORNER) ===================
+var table dashboard = table.new(position.top_right, 2, 12, 
+     bgcolor=color.new(color.black, 75), border_width=1, border_color=color.new(color.white, 70))
+
+if barstate.islast
+    totalEntries = weekBullEntries + weekBearEntries
+    totalClosed = weekTPHit + weekSLHit
+    winRate = totalClosed > 0 ? weekTPHit / totalClosed * 100 : 0.0
+    lossRate = totalClosed > 0 ? weekSLHit / totalClosed * 100 : 0.0
+    netProfitPct = weekProfit - weekLoss
+    activeTrades = array.size(activeBullEntry) + array.size(activeBearEntry)
+    
+    htfText = htfBullish ? "BULLISH" : htfBearish ? "BEARISH" : "NEUTRAL"
+    htfCol = htfBullish ? color.green : htfBearish ? color.red : color.gray
+    structText = currentStructure == 1 ? "BULLISH" : currentStructure == -1 ? "BEARISH" : "NEUTRAL"
+    structCol = currentStructure == 1 ? color.green : currentStructure == -1 ? color.red : color.gray
+    
+    // Header
+    table.cell(dashboard, 0, 0, "MR. CASINO SMC", text_color=color.white, text_size=size.normal, text_halign=text.align_center)
+    table.cell(dashboard, 1, 0, "1 WEEK STATS", text_color=color.yellow, text_size=size.normal, text_halign=text.align_center)
+    
+    // Separator
+    table.cell(dashboard, 0, 1, "--------", text_color=color.gray, text_size=size.small)
+    table.cell(dashboard, 1, 1, "--------", text_color=color.gray, text_size=size.small)
+    
+    // Entry counts
+    table.cell(dashboard, 0, 2, "Total Entries (7d):", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 2, str.tostring(totalEntries), text_color=color.aqua, text_size=size.small)
+    
+    table.cell(dashboard, 0, 3, "BUY Entries:", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 3, str.tostring(weekBullEntries), text_color=color.green, text_size=size.small)
+    
+    table.cell(dashboard, 0, 4, "SELL Entries:", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 4, str.tostring(weekBearEntries), text_color=color.red, text_size=size.small)
+    
+    // Win/Loss
+    table.cell(dashboard, 0, 5, "TP Hit (Win):", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 5, str.tostring(weekTPHit) + " (" + str.tostring(winRate, "#.#") + "%)", 
+         text_color=color.green, text_size=size.small)
+    
+    table.cell(dashboard, 0, 6, "SL Hit (Loss):", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 6, str.tostring(weekSLHit) + " (" + str.tostring(lossRate, "#.#") + "%)", 
+         text_color=color.red, text_size=size.small)
+    
+    // Profit/Loss
+    table.cell(dashboard, 0, 7, "Profit %:", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 7, "+" + str.tostring(weekProfit, "#.##") + "%", text_color=color.green, text_size=size.small)
+    
+    table.cell(dashboard, 0, 8, "Loss %:", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 8, "-" + str.tostring(weekLoss, "#.##") + "%", text_color=color.red, text_size=size.small)
+    
+    table.cell(dashboard, 0, 9, "Net P/L:", text_color=color.white, text_size=size.small)
+    netCol = netProfitPct >= 0 ? color.green : color.red
+    table.cell(dashboard, 1, 9, str.tostring(netProfitPct, "#.##") + "%", text_color=netCol, text_size=size.small)
+    
+    // Active & Bias
+    table.cell(dashboard, 0, 10, "Active Trades:", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 10, str.tostring(activeTrades), text_color=color.aqua, text_size=size.small)
+    
+    table.cell(dashboard, 0, 11, "HTF / Structure:", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 11, htfText + " / " + structText, text_color=htfCol, text_size=size.small)
+
+// =================== BACKGROUND ===================
+structureBG = currentStructure == 1 ? color.new(color.green, 97) : 
+     currentStructure == -1 ? color.new(color.red, 97) : na
+bgcolor(structureBG, title="Structure Background")
+
+// =================== ALERTS ===================
+alertcondition(bullEntry, "Buy Entry Signal", "SMC Buy Entry - SFU or OB confirmed")
+alertcondition(bearEntry, "Sell Entry Signal", "SMC Sell Entry - SFU or OB confirmed")
+alertcondition(bullishNegation or bearishNegation, "Structure Break", "HCS Break of Structure detected")
+alertcondition(eqHighDetected, "Equal Highs", "Liquidity pool above - Equal Highs")
+alertcondition(eqLowDetected, "Equal Lows", "Liquidity pool below - Equal Lows")
